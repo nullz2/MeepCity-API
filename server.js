@@ -449,15 +449,15 @@ app.post("/admin/moderate_party/:pid", (req, res) => {
 app.listen(PORT, () => {
   console.log(`
 ╔══════════════════════════════════════════════════════╗
-║         MeepCity API Server — Running on :${PORT}      ║
+║         MeepCity API Server — Running on :${PORT}    ║
 ╠══════════════════════════════════════════════════════╣
 ║  Endpoints mounted at /games/meepcity/               ║
 ║                                                      ║
 ║  In your Roblox Server script, set:                  ║
 ║    Server.APIServer =                                ║
-║      "http://<YOUR_HOST>:${PORT}/games/meepcity/"        ║
+║      "http://<YOUR_HOST>:${PORT}/games/meepcity/"    ║
 ║                                                      ║
-║  Admin panel: http://localhost:${PORT}/admin/status      ║
+║  Admin panel: http://localhost:${PORT}/admin/status  ║
 ╚══════════════════════════════════════════════════════╝
 `);
 });
