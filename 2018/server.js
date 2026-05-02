@@ -422,6 +422,23 @@ app.get(`${BASE}/update_party_thumbs.php`, (req, res) => {
   res.type("text/plain").send("ok");
 });
 
+// ─────────────────────────────────────────────────────────────────────────────
+// 17. get_population.php
+//     Handles how many players are in the game
+// ─────────────────────────────────────────────────────────────────────────────
+
+app.get(`${BASE}/get_population.php`, (req, res) => {
+  const { placeid } = req.query;
+  log("get_population", { placeid });
+
+  let total = 0;
+  for (const [, instance] of serverInstances) {
+    const players = Array.isArray(instance.players) ? instance.players : [];
+    total += players.length;
+  }
+
+  res.json(total);
+});
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Admin helpers (not called by the game – useful for management)
