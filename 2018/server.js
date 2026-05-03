@@ -73,6 +73,11 @@ function log(endpoint, query = {}) {
   console.log(`[${new Date().toISOString()}] ${endpoint}${qs ? " | " + qs : ""}`);
 }
 
+function parseIntSafe(value, fallback = 0) {
+  const n = parseInt(value, 10);
+  return isNaN(n) ? fallback : n;
+}
+
 function getFriendList(userId) {
   if (!friends.has(userId)) {
     friends.set(userId, new Set());
