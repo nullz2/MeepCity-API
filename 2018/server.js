@@ -56,6 +56,9 @@ const pendingSales = new Map();      // assetId -> pendingSales (flushed on set_
 const bannedPlayers = [];            // array of UserIds (numbers)
 const badSounds = [];                // array of SoundIds (numbers)
 const reportedSounds = new Map();    // soundId -> reportCount
+const friends = new Map();
+const friendRequests = new Map();
+
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
@@ -68,6 +71,20 @@ function log(endpoint, query = {}) {
     .map(([k, v]) => `${k}=${v}`)
     .join("&");
   console.log(`[${new Date().toISOString()}] ${endpoint}${qs ? " | " + qs : ""}`);
+}
+
+function getFriendList(userId) {
+  if (!friends.has(userId)) {
+    friends.set(userId, new Set());
+  }
+  return friends.get(userId);
+}
+
+function getFriendRequestList(userId) {
+  if (!friendRequests.has(userId)) {
+    friendRequests.set(userId, new Set());
+  }
+  return friendRequests.get(userId);
 }
 
 // ─── Base path ────────────────────────────────────────────────────────────────
@@ -438,6 +455,54 @@ app.get(`${BASE}/get_population.php`, (req, res) => {
   }
 
   res.json(total);
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 18. manage_friends.php
+//     Manages your MeepCity friends
+//     Params: uid (userid) tid (i forgor)
+// ─────────────────────────────────────────────────────────────────────────────
+
+app.get(`${BASE}/manage_friend.php`, (req, res) => {
+  const uid = parseIntSafe(req.query.uid, 0);
+  const tid = parseIntSafe(req.query.tid, 0);
+  const type = String(req.query.type || "").trim();
+
+  log("manage_friend", { uid, tid, type });
+
+  if (!uid || !tid || uid === tid || !type) {
+    return res.type("text/plain").send("ok");
+  }
+
+  if (type === "send_fr") {
+    const targetRequests = getFriendRequestList(tid);
+    targetRequests.add(uid);
+    return res.type("text/plain").send("ok");
+  }
+
+  if (type === "add") {
+    const userFriends = getFriendList(uid);
+    const targetFriends = getFriendList(tid);
+    userFriends.add(tid);
+    targetFriends.add(uid);
+
+    getFriendRequestList(uid).delete(tid);
+    getFriendRequestList(tid).delete(uid);
+
+    return res.type("text/plain").send("ok");
+  }
+
+  if (type === "remove") {
+    getFriendList(uid).delete(tid);
+    getFriendList(tid).delete(uid);
+
+    getFriendRequestList(uid).delete(tid);
+    getFriendRequestList(tid).delete(uid);
+
+    return res.type("text/plain").send("ok");
+  }
+
+  res.type("text/plain").send("ok");
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
