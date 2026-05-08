@@ -388,55 +388,6 @@ app.get(`${BASE}/report_bad_sound.php`, (req, res) => {
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
-// 16. get_online_friends.php
-//     Returns online friends across all active servers.
-//     Params: uid
-//
-//     Returns JSON:
-//     [
-//       {
-//         UserId,
-//         ServerType,
-//         ServerId
-//       }
-//     ]
-// ─────────────────────────────────────────────────────────────────────────────
-app.get(`${BASE}/get_online_friends.php`, (req, res) => {
-  const uid = parseInt(req.query.uid, 10);
-
-  log("get_online_friends", { uid });
-
-  const onlineFriends = [];
-
-  // Loop all active game servers
-  for (const [serverId, server] of serverInstances) {
-    if (!Array.isArray(server.players)) continue;
-
-    for (const player of server.players) {
-      // Skip invalid entries
-      if (!player || !player.UserId) continue;
-
-      // Don't include the requester themselves
-      if (player.UserId === uid) continue;
-
-      onlineFriends.push({
-        UserId: player.UserId,
-
-        // 1 = normal server
-        // 2 = party server
-        ServerType: server.party
-          ? 2
-          : 1,
-
-        ServerId: serverId
-      });
-    }
-  }
-
-  res.json(onlineFriends);
-});
-
-// ─────────────────────────────────────────────────────────────────────────────
 // Admin helpers (not called by the game – useful for management)
 // ─────────────────────────────────────────────────────────────────────────────
 
