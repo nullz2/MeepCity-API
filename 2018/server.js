@@ -511,6 +511,56 @@ app.get(`${BASE}/manage_friend.php`, (req, res) => {
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
+// 19. get_online_friends.php
+//     Returns ONLY online MeepCity friends
+//     Params: uid
+// ─────────────────────────────────────────────────────────────────────────────
+
+app.get(`${BASE}/get_online_friends.php`, (req, res) => {
+  const uid = parseIntSafe(req.query.uid, 0);
+
+  log("get_online_friends", { uid });
+
+  if (!uid) {
+    return res.json([]);
+  }
+
+  const userFriends = getFriendList(uid);
+
+  const result = [];
+
+  // Loop all active servers
+  for (const [serverId, instance] of serverInstances) {
+
+    const players = Array.isArray(instance.players)
+      ? instance.players
+      : [];
+
+    for (const player of players) {
+
+      const playerId = parseIntSafe(player.UserId, 0);
+
+      // Only include actual friends
+      if (!userFriends.has(playerId)) {
+        continue;
+      }
+
+      result.push({
+        UserId: playerId,
+
+        // 1 = normal
+        // 2 = party
+        ServerType: instance.party ? 2 : 1,
+
+        ServerId: serverId
+      });
+    }
+  }
+
+  res.json(result);
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Admin helpers (not called by the game – useful for management)
 // ─────────────────────────────────────────────────────────────────────────────
 
