@@ -16,12 +16,8 @@ const PORT = process.env.PORT || 3000;
 
 // ─── Middleware ───────────────────────────────────────────────────────────────
 
-// Parse compressed JSON bodies (the Roblox server compresses POSTs)
 app.use((req, res, next) => {
-  if (
-    req.method === "POST" &&
-    req.headers["content-encoding"] === "gzip"
-  ) {
+  if (req.method === "POST" && req.headers["content-encoding"] === "gzip") {
     const chunks = [];
     req.on("data", (c) => chunks.push(c));
     req.on("end", () => {
@@ -44,21 +40,20 @@ app.use(express.urlencoded({ extended: true }));
 
 // ─── In-Memory State ──────────────────────────────────────────────────────────
 
-let instanceCounter = 1000;          // Increments per new server instance
-const serverInstances = new Map();   // unique -> { playerList, platform, ... }
+let instanceCounter = 1000;
+const serverInstances = new Map();
+const playerPresence = new Map();
+const PRESENCE_TTL_SECONDS = 90;
 
-const parties = new Map();           // partyId -> partyObject
+const parties = new Map();
 let partyCounter = 1;
 
-const assetSales = new Map();        // assetId (string) -> totalSales (number)
-const pendingSales = new Map();      // assetId -> pendingSales (flushed on set_asset_sales)
-
-const bannedPlayers = [];            // array of UserIds (numbers)
-const badSounds = [];                // array of SoundIds (numbers)
-const reportedSounds = new Map();    // soundId -> reportCount
+const assetSales = new Map();
+const bannedPlayers = [];
+const badSounds = [];
+const reportedSounds = new Map();
 const friends = new Map();
 const friendRequests = new Map();
-
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
@@ -74,8 +69,243 @@ function log(endpoint, query = {}) {
 }
 
 function parseIntSafe(value, fallback = 0) {
-  const n = parseInt(value, 10);
-  return isNaN(n) ? fallback : n;
+  const parsed = parseInt(value, 10);
+  return Number.isFinite(parsed) ? parsed : fallback;
+}
+
+function normalizePartyLanguage(value) {
+  return value && String(value).trim() ? String(value).trim() : "English";
+}
+
+function normalizePartyCategory(value) {
+  return parseIntSafe(value, 4);
+}
+
+function normalizeString(value, fallback = "") {
+  if (value === undefined || value === null) {
+    return fallback;
+  }
+  return String(value);
+}
+
+function normalizeBoolean(value) {
+  if (typeof value === "boolean") {
+    return value;
+  }
+  if (typeof value === "number") {
+    return value !== 0;
+  }
+  const normalized = String(value || "").trim().toLowerCase();
+  return normalized === "1" || normalized === "true" || normalized === "yes";
+}
+
+function isLiveParty(party) {
+  return !!party && !party.dead;
+}
+
+function cleanupPresence(now = unixtime()) {
+  const cutoff = now - PRESENCE_TTL_SECONDS;
+
+  for (const [serverId, instance] of serverInstances) {
+    if ((instance.lastSeen || 0) < cutoff) {
+      serverInstances.delete(serverId);
+    }
+  }
+
+  for (const [userId, presence] of playerPresence) {
+    if ((presence.LastSeen || 0) < cutoff) {
+      playerPresence.delete(userId);
+    }
+  }
+}
+
+function serializePresence(presence) {
+  return {
+    UserId: presence.UserId,
+    Username: presence.Username,
+    ServerId: presence.ServerId,
+    JobId: presence.JobId,
+    PlaceId: presence.PlaceId,
+    ServerType: presence.ServerType,
+    IsParty: presence.IsParty,
+    PartyId: presence.PartyId,
+    PartyOwnerId: presence.PartyOwnerId,
+    PartyEstateVW: presence.PartyEstateVW,
+    PartyReserveId: presence.PartyReserveId,
+    LastSeen: presence.LastSeen,
+  };
+}
+
+function upsertPresenceFromHeartbeat(serverId, instanceData, player) {
+  const userId = parseIntSafe(player.UserId, 0);
+  if (!userId) {
+    return;
+  }
+
+  const isParty =
+    normalizeBoolean(player.IsParty) ||
+    normalizeBoolean(player.ServerType === 2) ||
+    normalizeBoolean(instanceData.isParty);
+
+  const presence = {
+    UserId: userId,
+    Username: normalizeString(player.Username, "Unknown"),
+    ServerId: serverId,
+    JobId: normalizeString(player.JobId || instanceData.jobId, ""),
+    PlaceId: normalizeString(player.PlaceId || instanceData.placeId, ""),
+    ServerType: parseIntSafe(
+      player.ServerType,
+      parseIntSafe(instanceData.serverType, isParty ? 2 : 1)
+    ),
+    IsParty: isParty,
+    PartyId: parseIntSafe(player.PartyId, parseIntSafe(instanceData.partyId, 0)),
+    PartyOwnerId: parseIntSafe(
+      player.PartyOwnerId,
+      parseIntSafe(instanceData.partyOwnerId, 0)
+    ),
+    PartyEstateVW: parseIntSafe(
+      player.PartyEstateVW,
+      parseIntSafe(instanceData.partyEstateVW, 0)
+    ),
+    PartyReserveId: normalizeString(
+      player.PartyReserveId || instanceData.partyReserveId,
+      ""
+    ),
+    LastSeen: instanceData.lastSeen,
+  };
+
+  playerPresence.set(userId, presence);
+}
+
+function serializeParty(party) {
+  return {
+    PartyId: party.partyId,
+    PartyOwnerId: party.ownerId,
+    PartyOwnerUsername: party.ownerUsername,
+    PartyTitle: party.title,
+    PartyPlayersOnline: party.playersOnline,
+    PartyMaxPlayers: party.maxPlayers,
+    PartyTier: party.estateTier,
+    PartyReserveId: party.reserveId,
+    PartyThumbsUp: party.thumbsUp,
+    PartyCategory: party.category,
+    PartyLanguage: party.language,
+    PartyEstateVW: party.estateVW,
+    PlaceId: party.placeId,
+  };
+}
+
+function getPresenceForUser(userId) {
+  cleanupPresence();
+  return playerPresence.get(userId) || null;
+}
+
+function getOnlinePartyPlayerCount(partyId) {
+  if (!partyId) {
+    return 0;
+  }
+
+  let total = 0;
+  for (const presence of playerPresence.values()) {
+    if (presence.PartyId === partyId) {
+      total += 1;
+    }
+  }
+  return total;
+}
+
+function serializeFriendStatus(presence) {
+  if (!presence) {
+    return { IsPlaying: false };
+  }
+
+  return {
+    IsPlaying: true,
+    ...serializePresence(presence),
+  };
+}
+
+function findPartyByReserveId(reserveId) {
+  const normalizedReserveId = normalizeString(reserveId, "").trim();
+  if (!normalizedReserveId) {
+    return null;
+  }
+
+  for (const party of parties.values()) {
+    if (
+      isLiveParty(party) &&
+      normalizeString(party.reserveId, "").trim() === normalizedReserveId
+    ) {
+      return party;
+    }
+  }
+
+  return null;
+}
+
+function findPartyById(partyId) {
+  const normalizedPartyId = parseIntSafe(partyId, 0);
+  if (!normalizedPartyId) {
+    return null;
+  }
+
+  const party = parties.get(normalizedPartyId);
+  return isLiveParty(party) ? party : null;
+}
+
+function findPartyByOwnerIds(ownerIds, placeId = "") {
+  const normalizedPlaceId = normalizeString(placeId, "").trim();
+  const matches = [];
+
+  for (const party of parties.values()) {
+    if (!isLiveParty(party) || !ownerIds.has(party.ownerId)) {
+      continue;
+    }
+
+    if (
+      normalizedPlaceId &&
+      normalizeString(party.placeId, "").trim() !== normalizedPlaceId
+    ) {
+      continue;
+    }
+
+    matches.push(party);
+  }
+
+  return matches.length === 1 ? matches[0] : null;
+}
+
+function hydrateInstancePartyData(instanceData, playerList) {
+  if (!instanceData.isParty) {
+    return instanceData;
+  }
+
+  const ownerIds = new Set(
+    playerList
+      .map((player) => parseIntSafe(player && player.UserId, 0))
+      .filter(Boolean)
+  );
+
+  const resolvedParty =
+    findPartyById(instanceData.partyId) ||
+    findPartyByReserveId(instanceData.partyReserveId) ||
+    findPartyByOwnerIds(ownerIds, instanceData.placeId);
+
+  if (!resolvedParty) {
+    return {
+      ...instanceData,
+      serverType: instanceData.serverType || 2,
+    };
+  }
+
+  return {
+    ...instanceData,
+    serverType: 2,
+    partyId: resolvedParty.partyId,
+    partyOwnerId: resolvedParty.ownerId,
+    partyEstateVW: resolvedParty.estateVW,
+    partyReserveId: normalizeString(resolvedParty.reserveId, ""),
+  };
 }
 
 function getFriendList(userId) {
@@ -96,67 +326,106 @@ function getFriendRequestList(userId) {
 
 const BASE = "/games/meepcity";
 
-// ─────────────────────────────────────────────────────────────────────────────
-// 1.  raw_unixtime.php
-//     Returns the current UNIX timestamp as plain text.
-//     Called by: Server.serverRequest("raw_unixtime", "cb=1")
-// ─────────────────────────────────────────────────────────────────────────────
 app.get(`${BASE}/raw_unixtime.php`, (req, res) => {
   log("raw_unixtime");
   res.type("text/plain").send(String(unixtime()));
 });
 
-// ─────────────────────────────────────────────────────────────────────────────
-// 2.  instance.php  (POST)
-//     Heartbeat sent every 60 s. Carries player counts, memory usage, jobId
-//     and a JSON body of [ { UserId, Username, PlayerCoins }, ... ].
-//
-//     Returns JSON:
-//       { Unique, ServerTime, BadSounds: [], BannedPlayers: [] }
-// ─────────────────────────────────────────────────────────────────────────────
 app.post(`${BASE}/instance.php`, (req, res) => {
   const q = req.query;
   log("instance", q);
+  cleanupPresence();
 
-  let unique = parseInt(q.unique, 10) || 0;
+  let unique = parseIntSafe(q.unique, 0);
 
   if (unique === 0) {
-    // New server – assign an ID
     unique = instanceCounter++;
     serverInstances.set(unique, { created: unixtime() });
   }
 
+  const previousInstance = serverInstances.get(unique) || {};
   const playerList = Array.isArray(req.body) ? req.body : [];
-
-  // Update stored snapshot
-  serverInstances.set(unique, {
-    ...(serverInstances.get(unique) || {}),
-    lastSeen: unixtime(),
+  const heartbeatTime = unixtime();
+  let instanceData = {
+    ...(previousInstance || {}),
+    lastSeen: heartbeatTime,
     players: playerList,
-    memory: parseInt(q.memory, 10) || 0,
+    memory: parseIntSafe(q.memory, 0),
     jobId: q.jobid || "",
+    placeId: normalizeString(q.placeid, previousInstance.placeId || ""),
+    serverType: parseIntSafe(
+      q.servertype ?? q.server_type,
+      previousInstance.serverType || 1
+    ),
+    isParty:
+      normalizeBoolean(q.is_party ?? q.isparty) ||
+      normalizeBoolean(q.partyid ?? q.party_id),
+    partyId: parseIntSafe(
+      q.partyid ?? q.party_id,
+      previousInstance.partyId || 0
+    ),
+    partyOwnerId: parseIntSafe(
+      q.partyownerid ?? q.party_owner_id,
+      previousInstance.partyOwnerId || 0
+    ),
+    partyEstateVW: parseIntSafe(
+      q.partyestatevw ?? q.party_estate_vw,
+      previousInstance.partyEstateVW || 0
+    ),
+    partyReserveId: normalizeString(
+      q.partyreserveid ??
+        q.party_reserve_id ??
+        q.reserveid ??
+        q.reserve_id ??
+        q.reserve,
+      previousInstance.partyReserveId || ""
+    ),
     platform: {
-      pc: parseInt(q.players_pc, 10) || 0,
-      tablet: parseInt(q.players_tablet, 10) || 0,
-      phone: parseInt(q.players_phone, 10) || 0,
-      gamepad: parseInt(q.players_gamepad, 10) || 0,
+      pc: parseIntSafe(q.players_pc, 0),
+      tablet: parseIntSafe(q.players_tablet, 0),
+      phone: parseIntSafe(q.players_phone, 0),
+      gamepad: parseIntSafe(q.players_gamepad, 0),
     },
-  });
+  };
+
+  instanceData = hydrateInstancePartyData(instanceData, playerList);
+
+  const activePlayers = new Set();
+  for (const player of playerList) {
+    const userId = parseIntSafe(player && player.UserId, 0);
+    if (!userId) {
+      continue;
+    }
+    activePlayers.add(userId);
+    upsertPresenceFromHeartbeat(unique, instanceData, player);
+  }
+
+  const previousPlayers = Array.isArray(previousInstance.players)
+    ? previousInstance.players
+    : [];
+  for (const previousPlayer of previousPlayers) {
+    const userId = parseIntSafe(previousPlayer && previousPlayer.UserId, 0);
+    const livePresence = playerPresence.get(userId);
+    if (
+      userId &&
+      !activePlayers.has(userId) &&
+      livePresence &&
+      livePresence.ServerId === unique
+    ) {
+      playerPresence.delete(userId);
+    }
+  }
+
+  serverInstances.set(unique, instanceData);
 
   res.json({
     Unique: unique,
-    ServerTime: unixtime(),
+    ServerTime: heartbeatTime,
     BadSounds: badSounds,
     BannedPlayers: bannedPlayers,
   });
 });
 
-// ─────────────────────────────────────────────────────────────────────────────
-// 3.  report_error.php
-//     Receives server/client errors.
-//     Params: errortype (1=server, 2=client, 3=warning), version, message,
-//             trace, serverid, userid, addtocount
-// ─────────────────────────────────────────────────────────────────────────────
 app.get(`${BASE}/report_error.php`, (req, res) => {
   const q = req.query;
   const typeMap = { 1: "SERVER", 2: "CLIENT", 3: "WARNING" };
@@ -168,101 +437,83 @@ app.get(`${BASE}/report_error.php`, (req, res) => {
   res.type("text/plain").send("ok");
 });
 
-// ─────────────────────────────────────────────────────────────────────────────
-// 4.  get_parties.php
-//     Returns the list of active parties for a given placeid/platform.
-//     Params: placeid, platform (1=PC/mobile, 2=Xbox)
-// ─────────────────────────────────────────────────────────────────────────────
 app.get(`${BASE}/get_parties.php`, (req, res) => {
   const { placeid, platform } = req.query;
   log("get_parties", { placeid, platform });
+  cleanupPresence();
 
   const list = [];
-  for (const [id, p] of parties) {
+  for (const [, p] of parties) {
     if (
       String(p.placeId) === String(placeid) &&
       String(p.platform) === String(platform) &&
       !p.moderated &&
       !p.dead
     ) {
-list.push({
-  PartyId: id,
-  PartyOwnerId: p.ownerId,
-  PartyOwnerUsername: p.ownerUsername,
-  PartyTitle: p.title,
-  PartyPlayersOnline: p.playersOnline,
-  PartyMaxPlayers: p.maxPlayers,
-  PartyTier: p.estateTier,
-  PartyReserveId: p.reserveId,
-
-  PartyThumbsUp: p.thumbsUp || 0,
-  PartyCategory: p.category || 4,
-  PartyLanguage: p.language || "English",
-  PartyEstateVW: p.estateVW || 0,
-});
-
+      p.playersOnline = getOnlinePartyPlayerCount(p.partyId);
+      list.push(serializeParty(p));
     }
   }
 
   res.json(list);
 });
 
-// ─────────────────────────────────────────────────────────────────────────────
-// 5.  create_party.php
-//     Creates a new party. Params: uid, username, title, reserve, placeid,
-//                                   maxplayers, estatetier, platform
-//     Returns JSON: { Response: "SUCCESS"|"BANNED", PartyId, BanHoursLeft }
-// ─────────────────────────────────────────────────────────────────────────────
+app.get(`${BASE}/get_population.php`, (req, res) => {
+  const { placeid } = req.query;
+  log("get_population", { placeid });
+  cleanupPresence();
+
+  let total = 0;
+  for (const presence of playerPresence.values()) {
+    if (!placeid || String(presence.PlaceId) === String(placeid)) {
+      total += 1;
+    }
+  }
+
+  res.json(total);
+});
+
 app.get(`${BASE}/create_party.php`, (req, res) => {
   const q = req.query;
   log("create_party", q);
 
-  // Check if owner is banned (extend with real ban logic as needed)
-  if (bannedPlayers.includes(parseInt(q.uid, 10))) {
+  const ownerId = parseIntSafe(q.uid, 0);
+  if (bannedPlayers.includes(ownerId)) {
     return res.json({ Response: "BANNED", BanHoursLeft: 24 });
   }
 
   const partyId = partyCounter++;
 
-parties.set(partyId, {
-  partyId,
-  ownerId: parseInt(q.uid, 10),
-  ownerUsername: q.username || "Unknown",
-  title: decodeURIComponent(q.title || "Untitled Party"),
-  reserveId: q.reserve,
-  placeId: q.placeid,
-  maxPlayers: parseInt(q.maxplayers, 10) || 30,
-  estateTier: parseInt(q.estatetier, 10) || 1,
-  platform: parseInt(q.platform, 10) || 1,
-  playersOnline: 1,
-  created: unixtime(),
-  moderated: false,
-  dead: false,
-
-  thumbsUp: 0,
-  category: parseInt(q.category, 10) || 4,
-  language: q.language || "English",
-  estateVW: parseInt(q.estatevw, 10) || 0,
-});
-
+  parties.set(partyId, {
+    partyId,
+    ownerId,
+    ownerUsername: q.username || "Unknown",
+    title: decodeURIComponent(q.title || "Untitled Party"),
+    reserveId: q.reserve || "",
+    placeId: q.placeid || "",
+    maxPlayers: parseIntSafe(q.maxplayers, 30),
+    estateTier: parseIntSafe(q.estatetier, 1),
+    platform: parseIntSafe(q.platform, 1),
+    playersOnline: 1,
+    thumbsUp: 0,
+    category: normalizePartyCategory(q.category),
+    language: normalizePartyLanguage(q.language),
+    estateVW: parseIntSafe(q.estatevw, 0),
+    created: unixtime(),
+    moderated: false,
+    dead: false,
+  });
 
   console.log(`[PARTY] Created party #${partyId} by ${q.username} (${q.uid})`);
-
   res.json({ Response: "SUCCESS", PartyId: partyId });
 });
 
-// ─────────────────────────────────────────────────────────────────────────────
-// 6.  update_party.php
-//     Updates player count for a party.
-//     Params: pid, players
-//     Returns JSON: { PartyIsModerated: 0|1 }
-// ─────────────────────────────────────────────────────────────────────────────
 app.get(`${BASE}/update_party.php`, (req, res) => {
   const { pid, players } = req.query;
-  const party = parties.get(parseInt(pid, 10));
+  const party = parties.get(parseIntSafe(pid, -1));
 
   if (party) {
-    party.playersOnline = parseInt(players, 10) || 0;
+    party.playersOnline = parseIntSafe(players, 0);
   }
 
   res.json({
@@ -270,14 +521,22 @@ app.get(`${BASE}/update_party.php`, (req, res) => {
   });
 });
 
-// ─────────────────────────────────────────────────────────────────────────────
-// 7.  kill_party.php
-//     Marks a party as dead/ended.
-//     Params: pid
-// ─────────────────────────────────────────────────────────────────────────────
+app.get(`${BASE}/update_party_thumbs.php`, (req, res) => {
+  const { pid, thumbs } = req.query;
+  const party = parties.get(parseIntSafe(pid, -1));
+  log("update_party_thumbs", { pid, thumbs });
+
+  if (!party) {
+    return res.type("text/plain").send("notfound");
+  }
+
+  party.thumbsUp = Math.max(0, parseIntSafe(thumbs, party.thumbsUp));
+  res.type("text/plain").send("ok");
+});
+
 app.get(`${BASE}/kill_party.php`, (req, res) => {
   const { pid } = req.query;
-  const party = parties.get(parseInt(pid, 10));
+  const party = parties.get(parseIntSafe(pid, -1));
   if (party) {
     party.dead = true;
     console.log(`[PARTY] Party #${pid} ended`);
@@ -285,59 +544,45 @@ app.get(`${BASE}/kill_party.php`, (req, res) => {
   res.type("text/plain").send("ok");
 });
 
-// ─────────────────────────────────────────────────────────────────────────────
-// 8.  get_party_data.php
-//     Returns details about a specific party.
-//     Params: pid
-//     Returns JSON: { Response: "SUCCESS"|"NOTFOUND", PartyOwner, ... }
-// ─────────────────────────────────────────────────────────────────────────────
 app.get(`${BASE}/get_party_data.php`, (req, res) => {
   const { pid } = req.query;
-  const party = parties.get(parseInt(pid, 10));
+  const party = parties.get(parseIntSafe(pid, -1));
+  cleanupPresence();
 
   if (!party) {
     return res.json({ Response: "NOTFOUND" });
   }
 
-res.json({
-  Response: "SUCCESS",
-  PartyId: party.partyId,
-  PartyOwner: party.ownerId,
-  PartyOwnerUsername: party.ownerUsername,
-  PartyTitle: party.title,
-  PartyReserveId: party.reserveId,
-  PartyMaxPlayers: party.maxPlayers,
-  PartyEstateTier: party.estateTier,
-  PartyIsModerated: party.moderated ? 1 : 0,
+  party.playersOnline = getOnlinePartyPlayerCount(party.partyId);
 
-  PartyThumbsUp: party.thumbsUp || 0,
-  PartyCategory: party.category || 4,
-  PartyLanguage: party.language || "English",
-  PartyEstateVW: party.estateVW || 0,
+  res.json({
+    Response: "SUCCESS",
+    PartyId: party.partyId,
+    PartyOwner: party.ownerId,
+    PartyOwnerId: party.ownerId,
+    PartyOwnerUsername: party.ownerUsername,
+    PartyTitle: party.title,
+    PartyReserveId: party.reserveId,
+    PartyPlayersOnline: party.playersOnline,
+    PartyMaxPlayers: party.maxPlayers,
+    PartyEstateTier: party.estateTier,
+    PartyEstateVW: party.estateVW,
+    PartyCategory: party.category,
+    PartyLanguage: party.language,
+    PartyThumbsUp: party.thumbsUp,
+    PartyIsModerated: party.moderated ? 1 : 0,
   });
 });
 
-// ─────────────────────────────────────────────────────────────────────────────
-// 9.  get_asset_sales.php
-//     Returns total sales per asset.
-//     Returns JSON array: [ { AssetId: "N", Sales: "N" }, ... ]
-// ─────────────────────────────────────────────────────────────────────────────
 app.get(`${BASE}/get_asset_sales.php`, (req, res) => {
   log("get_asset_sales");
-
   const result = [];
   for (const [assetId, sales] of assetSales) {
     result.push({ AssetId: assetId, Sales: String(sales) });
   }
-
   res.json(result);
 });
 
-// ─────────────────────────────────────────────────────────────────────────────
-// 10. set_asset_sales.php  (POST)
-//     Receives new sales delta from the game server.
-//     Body: JSON array of [ [assetId, deltaSales], ... ]
-// ─────────────────────────────────────────────────────────────────────────────
 app.post(`${BASE}/set_asset_sales.php`, (req, res) => {
   const data = Array.isArray(req.body) ? req.body : [];
   log("set_asset_sales", { count: data.length });
@@ -351,11 +596,6 @@ app.post(`${BASE}/set_asset_sales.php`, (req, res) => {
   res.type("text/plain").send("ok");
 });
 
-// ─────────────────────────────────────────────────────────────────────────────
-// 11. assetPurchased.php
-//     Records a developer product purchase.
-//     Params: pUId, DProduct, type, robux, receipt
-// ─────────────────────────────────────────────────────────────────────────────
 app.get(`${BASE}/assetPurchased.php`, (req, res) => {
   const q = req.query;
   log("assetPurchased", q);
@@ -365,40 +605,19 @@ app.get(`${BASE}/assetPurchased.php`, (req, res) => {
   res.type("text/plain").send("ok");
 });
 
-// ─────────────────────────────────────────────────────────────────────────────
-// 12. record_apt.php
-//     Records average play time for analytics.
-//     Params: uid, pt (play time seconds), d (platform id)
-// ─────────────────────────────────────────────────────────────────────────────
 app.get(`${BASE}/record_apt.php`, (req, res) => {
   const q = req.query;
   log("record_apt", q);
-  // Store or log as needed
   console.log(`[APT] uid=${q.uid} playtime=${q.pt}s platform=${q.d}`);
   res.type("text/plain").send("ok");
 });
 
-// ─────────────────────────────────────────────────────────────────────────────
-// 13. search_music.php
-//     Music search endpoint used by the Boombox.
-//     Params: search (URL-encoded query)
-//     Returns JSON array: [ { Id, Title }, ... ]
-//     Note: Roblox's Marketplace API is used in production. Here we return
-//     a stub — replace with a real music lookup if needed.
-// ─────────────────────────────────────────────────────────────────────────────
 app.get(`${BASE}/search_music.php`, (req, res) => {
   const search = decodeURIComponent(req.query.search || "");
   log("search_music", { search });
-
-  // Stub: return empty results. Hook into your own music catalog here.
   res.json([]);
 });
 
-// ─────────────────────────────────────────────────────────────────────────────
-// 14. twitter_code_use.php
-//     Records that a player redeemed a Twitter promo code.
-//     Params: uid, title (code string)
-// ─────────────────────────────────────────────────────────────────────────────
 app.get(`${BASE}/twitter_code_use.php`, (req, res) => {
   const q = req.query;
   log("twitter_code_use", q);
@@ -406,13 +625,8 @@ app.get(`${BASE}/twitter_code_use.php`, (req, res) => {
   res.type("text/plain").send("ok");
 });
 
-// ─────────────────────────────────────────────────────────────────────────────
-// 15. report_bad_sound.php
-//     Called when players flag a loud/inappropriate sound.
-//     Params: sid (sound asset id)
-// ─────────────────────────────────────────────────────────────────────────────
 app.get(`${BASE}/report_bad_sound.php`, (req, res) => {
-  const sid = parseInt(req.query.sid, 10);
+  const sid = parseIntSafe(req.query.sid, 0);
   log("report_bad_sound", { sid });
 
   const count = (reportedSounds.get(sid) || 0) + 1;
@@ -425,48 +639,6 @@ app.get(`${BASE}/report_bad_sound.php`, (req, res) => {
 
   res.type("text/plain").send("ok");
 });
-
-// ─────────────────────────────────────────────────────────────────────────────
-// 16. update_party_thumbs.php
-//     Called when players likes the party
-//     Params: pid (party id)
-// ─────────────────────────────────────────────────────────────────────────────
-
-app.get(`${BASE}/update_party_thumbs.php`, (req, res) => {
-  const { pid, thumbs } = req.query;
-  const party = parties.get(parseInt(pid, 10));
-
-  if (!party) {
-    return res.type("text/plain").send("ok");
-  }
-
-  party.thumbsUp = parseInt(thumbs, 10) || party.thumbsUp || 0;
-  res.type("text/plain").send("ok");
-});
-
-// ─────────────────────────────────────────────────────────────────────────────
-// 17. get_population.php
-//     Handles how many players are in the game
-// ─────────────────────────────────────────────────────────────────────────────
-
-app.get(`${BASE}/get_population.php`, (req, res) => {
-  const { placeid } = req.query;
-  log("get_population", { placeid });
-
-  let total = 0;
-  for (const [, instance] of serverInstances) {
-    const players = Array.isArray(instance.players) ? instance.players : [];
-    total += players.length;
-  }
-
-  res.json(total);
-});
-
-// ─────────────────────────────────────────────────────────────────────────────
-// 18. manage_friends.php
-//     Manages your MeepCity friends
-//     Params: uid (userid) tid (i forgor)
-// ─────────────────────────────────────────────────────────────────────────────
 
 app.get(`${BASE}/manage_friend.php`, (req, res) => {
   const uid = parseIntSafe(req.query.uid, 0);
@@ -510,16 +682,51 @@ app.get(`${BASE}/manage_friend.php`, (req, res) => {
   res.type("text/plain").send("ok");
 });
 
-// ─────────────────────────────────────────────────────────────────────────────
-// 19. get_online_friends.php
-//     Returns ONLY online MeepCity friends
-//     Params: uid
-// ─────────────────────────────────────────────────────────────────────────────
-
 app.get(`${BASE}/get_online_friends.php`, (req, res) => {
   const uid = parseIntSafe(req.query.uid, 0);
-
   log("get_online_friends", { uid });
+
+  if (!uid) {
+    return res.json([]);
+  }
+
+  cleanupPresence();
+  const userFriends = getFriendList(uid);
+  const result = [];
+
+  for (const friendId of userFriends) {
+    const presence = playerPresence.get(friendId);
+    if (!presence) {
+      continue;
+    }
+    result.push(serializePresence(presence));
+  }
+
+  res.json(result);
+});
+
+app.get(`${BASE}/get_online_friend.php`, (req, res) => {
+  const uid = parseIntSafe(req.query.uid, 0);
+  const fid = parseIntSafe(req.query.fid, 0);
+  log("get_online_friend", { uid, fid });
+
+  if (!uid || !fid) {
+    return res.json({ IsPlaying: false });
+  }
+
+  const userFriends = getFriendList(uid);
+  if (!userFriends.has(fid)) {
+    return res.json({ IsPlaying: false });
+  }
+
+  const presence = getPresenceForUser(fid);
+  res.json(serializeFriendStatus(presence));
+});
+
+app.get(`${BASE}/get_meepcity_friends.php`, (req, res) => {
+  const uid = parseIntSafe(req.query.uid, 0);
+
+  log("get_meepcity_friends", { uid });
 
   if (!uid) {
     return res.json([]);
@@ -529,42 +736,40 @@ app.get(`${BASE}/get_online_friends.php`, (req, res) => {
 
   const result = [];
 
-  // Loop all active servers
-  for (const [serverId, instance] of serverInstances) {
+  for (const friendId of userFriends) {
 
-    const players = Array.isArray(instance.players)
-      ? instance.players
-      : [];
+    let username = `Player${friendId}`;
 
-    for (const player of players) {
+    
+    for (const [, instance] of serverInstances) {
 
-      const playerId = parseIntSafe(player.UserId, 0);
+      const players = Array.isArray(instance.players)
+        ? instance.players
+        : [];
 
-      // Only include actual friends
-      if (!userFriends.has(playerId)) {
-        continue;
+      const foundPlayer = players.find(
+        p => parseIntSafe(p.UserId, 0) === friendId
+      );
+
+      if (foundPlayer) {
+        username =
+          foundPlayer.Username ||
+          foundPlayer.Name ||
+          username;
+
+        break;
       }
-
-      result.push({
-        UserId: playerId,
-
-        // 1 = normal
-        // 2 = party
-        ServerType: instance.party ? 2 : 1,
-
-        ServerId: serverId
-      });
     }
+
+    result.push({
+      UserId: friendId,
+      Username: username
+    });
   }
 
   res.json(result);
 });
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Admin helpers (not called by the game – useful for management)
-// ─────────────────────────────────────────────────────────────────────────────
-
-// GET /admin/status  – quick overview
 app.get("/admin/status", (req, res) => {
   res.json({
     serverTime: unixtime(),
@@ -576,48 +781,39 @@ app.get("/admin/status", (req, res) => {
   });
 });
 
-// POST /admin/ban/:uid   – ban a player
 app.post("/admin/ban/:uid", (req, res) => {
-  const uid = parseInt(req.params.uid, 10);
+  const uid = parseIntSafe(req.params.uid, 0);
   if (!bannedPlayers.includes(uid)) bannedPlayers.push(uid);
   res.json({ ok: true, bannedPlayers });
 });
 
-// DELETE /admin/ban/:uid  – unban
 app.delete("/admin/ban/:uid", (req, res) => {
-  const uid = parseInt(req.params.uid, 10);
+  const uid = parseIntSafe(req.params.uid, 0);
   const idx = bannedPlayers.indexOf(uid);
   if (idx !== -1) bannedPlayers.splice(idx, 1);
   res.json({ ok: true, bannedPlayers });
 });
 
-// POST /admin/ban_sound/:sid
 app.post("/admin/ban_sound/:sid", (req, res) => {
-  const sid = parseInt(req.params.sid, 10);
+  const sid = parseIntSafe(req.params.sid, 0);
   if (!badSounds.includes(sid)) badSounds.push(sid);
   res.json({ ok: true, badSounds });
 });
 
-// DELETE /admin/ban_sound/:sid
 app.delete("/admin/ban_sound/:sid", (req, res) => {
-  const sid = parseInt(req.params.sid, 10);
+  const sid = parseIntSafe(req.params.sid, 0);
   const idx = badSounds.indexOf(sid);
   if (idx !== -1) badSounds.splice(idx, 1);
   res.json({ ok: true, badSounds });
 });
 
-// POST /admin/moderate_party/:pid
 app.post("/admin/moderate_party/:pid", (req, res) => {
-  const pid = parseInt(req.params.pid, 10);
+  const pid = parseIntSafe(req.params.pid, 0);
   const party = parties.get(pid);
   if (!party) return res.status(404).json({ error: "Party not found" });
   party.moderated = true;
-  res.json({ ok: true, party });
+  res.json({ ok: true, party: serializeParty(party) });
 });
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Start
-// ─────────────────────────────────────────────────────────────────────────────
 
 app.listen(PORT, () => {
   console.log(`
