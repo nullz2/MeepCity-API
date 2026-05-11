@@ -322,6 +322,14 @@ function getFriendRequestList(userId) {
   return friendRequests.get(userId);
 }
 
+function makeFriendResponse(success = true, code = "SUCCESS") {
+  return {
+    Response: success ? "SUCCESS" : "ERROR",
+    Success: success,
+    Code: code,
+  };
+}
+
 // ─── Base path ────────────────────────────────────────────────────────────────
 
 const BASE = "/games/meepcity";
