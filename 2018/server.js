@@ -871,6 +871,29 @@ app.get(`${BASE}/remove_meepcity_friend.php`, (req, res) => {
   res.json(makeFriendResponse(true));
 });
 
+app.get(`${BASE}/are_meepcity_friends.php`, (req, res) => {
+  const uid = parseIntSafe(req.query.uid, 0);
+  const target = parseIntSafe(req.query.target, 0);
+
+  log("are_meepcity_friends", { uid, target });
+
+  if (!uid || !target || uid === target) {
+    return res.json({
+      Response: "ERROR",
+      Success: false,
+      IsFriend: false,
+    });
+  }
+
+  const isFriend = getFriendList(uid).has(target);
+
+  res.json({
+    Response: "SUCCESS",
+    Success: true,
+    IsFriend: isFriend,
+  });
+});
+
 app.post("/admin/ban/:uid", (req, res) => {
   const uid = parseIntSafe(req.params.uid, 0);
   if (!bannedPlayers.includes(uid)) bannedPlayers.push(uid);
