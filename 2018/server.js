@@ -781,6 +781,88 @@ app.get("/admin/status", (req, res) => {
   });
 });
 
+app.get(`${BASE}/send_meepcity_friend_request.php`, (req, res) => {
+  const uid = parseIntSafe(req.query.uid, 0);
+  const target = parseIntSafe(req.query.target, 0);
+
+  log("send_meepcity_friend_request", { uid, target });
+
+  if (!uid || !target || uid === target) {
+    return res.json(makeFriendResponse(false, "ERROR"));
+  }
+
+  const targetRequests = getFriendRequestList(target);
+
+  // already friends
+  if (getFriendList(uid).has(target)) {
+    return res.json(makeFriendResponse(false, "ALREADY_FRIENDS"));
+  }
+
+  targetRequests.add(uid);
+
+  res.json(makeFriendResponse(true));
+});
+
+app.get(`${BASE}/accept_meepcity_friend_request.php`, (req, res) => {
+  const uid = parseIntSafe(req.query.uid, 0);
+  const target = parseIntSafe(req.query.target, 0);
+
+  log("accept_meepcity_friend_request", { uid, target });
+
+  if (!uid || !target || uid === target) {
+    return res.json(makeFriendResponse(false, "ERROR"));
+  }
+
+  const requests = getFriendRequestList(uid);
+
+  // no request exists
+  if (!requests.has(target)) {
+    return res.json(makeFriendResponse(false, "NO_REQUEST"));
+  }
+
+  getFriendList(uid).add(target);
+  getFriendList(target).add(uid);
+
+  requests.delete(target);
+  getFriendRequestList(target).delete(uid);
+
+  res.json(makeFriendResponse(true));
+});
+
+app.get(`${BASE}/decline_meepcity_friend_request.php`, (req, res) => {
+  const uid = parseIntSafe(req.query.uid, 0);
+  const target = parseIntSafe(req.query.target, 0);
+
+  log("decline_meepcity_friend_request", { uid, target });
+
+  if (!uid || !target || uid === target) {
+    return res.json(makeFriendResponse(false, "ERROR"));
+  }
+
+  getFriendRequestList(uid).delete(target);
+
+  res.json(makeFriendResponse(true));
+});
+
+app.get(`${BASE}/remove_meepcity_friend.php`, (req, res) => {
+  const uid = parseIntSafe(req.query.uid, 0);
+  const target = parseIntSafe(req.query.target, 0);
+
+  log("remove_meepcity_friend", { uid, target });
+
+  if (!uid || !target || uid === target) {
+    return res.json(makeFriendResponse(false, "ERROR"));
+  }
+
+  getFriendList(uid).delete(target);
+  getFriendList(target).delete(uid);
+
+  getFriendRequestList(uid).delete(target);
+  getFriendRequestList(target).delete(uid);
+
+  res.json(makeFriendResponse(true));
+});
+
 app.post("/admin/ban/:uid", (req, res) => {
   const uid = parseIntSafe(req.params.uid, 0);
   if (!bannedPlayers.includes(uid)) bannedPlayers.push(uid);
