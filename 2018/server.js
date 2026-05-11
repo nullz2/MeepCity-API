@@ -894,6 +894,34 @@ app.get(`${BASE}/are_meepcity_friends.php`, (req, res) => {
   });
 });
 
+app.get(`${BASE}/get_meepcity_friend_requests.php`, (req, res) => {
+  const uid = parseIntSafe(req.query.uid, 0);
+
+  log("get_meepcity_friend_requests", { uid });
+
+  if (!uid) {
+    return res.json({
+      Response: "ERROR",
+      Requests: [],
+    });
+  }
+
+  const requests = getFriendRequestList(uid);
+
+  const result = [];
+
+  for (const requesterId of requests) {
+    result.push({
+      UserId: requesterId,
+    });
+  }
+
+  res.json({
+    Response: "SUCCESS",
+    Requests: result,
+  });
+});
+
 app.post("/admin/ban/:uid", (req, res) => {
   const uid = parseIntSafe(req.params.uid, 0);
   if (!bannedPlayers.includes(uid)) bannedPlayers.push(uid);
